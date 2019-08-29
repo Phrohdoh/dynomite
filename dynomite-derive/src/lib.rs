@@ -153,9 +153,12 @@ fn expand_item(ast: DeriveInput) -> syn::Result<impl ToTokens> {
     let vis = &ast.vis;
     match ast.data {
         Struct(DataStruct { fields, .. }) => match fields {
-            Fields::Named(named) => {
-                make_dynomite_item(attrs, vis, name, &named.named.into_iter().collect::<Vec<_>>())
-            }
+            Fields::Named(named) => make_dynomite_item(
+                attrs,
+                vis,
+                name,
+                &named.named.into_iter().collect::<Vec<_>>(),
+            ),
             _ => panic!("Dynomite Items require named fields"),
         },
         _ => panic!("Dynomite Items can only be generated for structs"),
@@ -176,7 +179,10 @@ enum RenameFmt {
 }
 
 impl RenameFmt {
-    fn transform(&self, s: &'_ str) -> String {
+    fn transform(
+        &self,
+        s: &'_ str,
+    ) -> String {
         use heck::*;
 
         match *self {
@@ -220,17 +226,16 @@ impl std::convert::TryFrom<&str> for RenameFmt {
 ///    - not a valid `RenameFmt` value (see `impl TryFrom<&str> for RenameFmt`)
 /// - `Ok(None)` if no `rename_all` attribute is present in `struct_attrs`
 /// - `Ok(Some(RenameFmt))` otherwise
-fn get_struct_rename_all_fmt(
-    struct_attrs: &[syn::Attribute],
-) -> syn::Result<Option<RenameFmt>> {
+fn get_struct_rename_all_fmt(struct_attrs: &[syn::Attribute]) -> syn::Result<Option<RenameFmt>> {
     use std::convert::TryFrom as _;
     use syn::spanned::Spanned as _;
 
     let tups_attr_lit: Vec<_> = dynomite_attributes(struct_attrs)
-        .filter_map(|attr|
-            get_name_eq_value_attribute_lit(attr, "rename_all").ok()
+        .filter_map(|attr| {
+            get_name_eq_value_attribute_lit(attr, "rename_all")
+                .ok()
                 .map(|lit| (attr, lit))
-        )
+        })
         .collect();
 
     match tups_attr_lit.len() {
@@ -249,20 +254,20 @@ fn get_struct_rename_all_fmt(
                         ));
                     }
 
-                    let fmt = RenameFmt::try_from(lit_str.value().as_ref())
-                        .map_err(|()| syn::Error::new(
-                            lit_str.span(),
-                            "invalid `rename_all` attribute value",
-                        ))?;
+                    let fmt = RenameFmt::try_from(lit_str.value().as_ref()).map_err(|()| {
+                        syn::Error::new(lit_str.span(), "invalid `rename_all` attribute value")
+                    })?;
 
                     Ok(Some(fmt))
-                },
-                _ => return Err(syn::Error::new(
-                    attr.span(),
-                    "`rename_all` attribute value must be a string literal",
-                )),
+                }
+                _ => {
+                    return Err(syn::Error::new(
+                        attr.span(),
+                        "`rename_all` attribute value must be a string literal",
+                    ))
+                }
             }
-        },
+        }
         _ => {
             // Pick the 2nd since it is the first duplicate
             let attr_to_err_on = tups_attr_lit[1].0;
@@ -270,7 +275,7 @@ fn get_struct_rename_all_fmt(
                 attr_to_err_on.span(),
                 "structs may have a maximum of 1 `#[dynomite(rename_all = \"...\")]` attribute",
             ));
-        },
+        }
     }
 }
 
@@ -404,7 +409,8 @@ fn get_field_deser_name(
 ) -> syn::Result<String> {
     use syn::spanned::Spanned as _;
 
-    let name = field.ident
+    let name = field
+        .ident
         .as_ref()
         .expect("name-less fields are not supported")
         .to_string();
