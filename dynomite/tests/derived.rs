@@ -26,11 +26,12 @@ pub struct Book {
 }
 
 #[derive(Item, PartialEq, Debug, Clone)]
+#[dynomite(rename_all = "SCREAMING_SNAKE_CASE")]
 struct Recipe {
     #[partition_key]
     #[dynomite(rename = "recipe_id")]
     id: String,
-    servings: u64,
+    num_servings: u64,
 }
 
 #[cfg(test)]
@@ -59,16 +60,21 @@ mod tests {
     }
 
     #[test]
-    fn field_rename() {
+    fn rename_attributes() {
         let value = Recipe {
             id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
-            servings: 2,
+            num_servings: 2,
         };
 
         let attrs: Attributes = value.clone().into();
 
+        // `id` is renamed to `recipe_id`
         assert!(attrs.contains_key("recipe_id"));
         assert!(!attrs.contains_key("id"));
+
+        // `num_servings` is renamed to `NUM_SERVINGS`
+        assert!(attrs.contains_key("NUM_SERVINGS"));
+        assert!(!attrs.contains_key("num_servings"));
 
         assert_eq!(value, Recipe::from_attrs(attrs).unwrap());
     }

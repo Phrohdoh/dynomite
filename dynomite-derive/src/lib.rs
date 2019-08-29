@@ -148,12 +148,13 @@ fn make_dynomite_attr(
 }
 
 fn expand_item(ast: DeriveInput) -> syn::Result<impl ToTokens> {
+    let attrs = &ast.attrs;
     let name = &ast.ident;
     let vis = &ast.vis;
     match ast.data {
         Struct(DataStruct { fields, .. }) => match fields {
             Fields::Named(named) => {
-                make_dynomite_item(vis, name, &named.named.into_iter().collect::<Vec<_>>())
+                make_dynomite_item(attrs, vis, name, &named.named.into_iter().collect::<Vec<_>>())
             }
             _ => panic!("Dynomite Items require named fields"),
         },
@@ -161,14 +162,128 @@ fn expand_item(ast: DeriveInput) -> syn::Result<impl ToTokens> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+/// Used by the `#[dynomite(rename_all = "...")]` attribute feature.
+enum RenameFmt {
+    LowerCase,
+    UpperCase,
+    SnakeCase,
+    KebabCase,
+    CamelCase,
+    PascalCase,
+    ScreamingSnakeCase,
+    ScreamingKebabCase,
+}
+
+impl RenameFmt {
+    fn transform(&self, s: &'_ str) -> String {
+        use heck::*;
+
+        match *self {
+            Self::LowerCase => s.to_lowercase(),
+            Self::UpperCase => s.to_uppercase(),
+            Self::SnakeCase => s.to_snake_case(),
+            Self::KebabCase => s.to_kebab_case(),
+            Self::CamelCase => s.to_camel_case(),
+            Self::PascalCase => s.to_mixed_case(),
+            Self::ScreamingSnakeCase => s.to_shouty_snake_case(),
+            other => unimplemented!("{:#?}", other),
+        }
+    }
+}
+
+impl std::convert::TryFrom<&str> for RenameFmt {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Ok(match value {
+            "snake_case" => Self::SnakeCase,
+            "kebab-case" => Self::KebabCase,
+            "camelCase" => Self::CamelCase,
+            "PascalCase" => Self::PascalCase,
+            "SCREAMING_SNAKE_CASE" => Self::ScreamingSnakeCase,
+            "SCREAMING-KEBAB-CASE" => Self::ScreamingKebabCase,
+            "UPPERCASE" => Self::UpperCase,
+            "lowercase" => Self::LowerCase,
+            _ => return Err(()),
+        })
+    }
+}
+
+/// Get a `RenameFmt` from a `#[dynomite(rename_all = "...")]` struct attribute
+///
+/// # Returns
+/// - `Err` if multiple `rename_all` attributes are present in `struct_attrs`
+/// - `Err` if the `rename_all` attribute's value is:
+///    - not a string literal
+///    - an empty string literal
+///    - not a valid `RenameFmt` value (see `impl TryFrom<&str> for RenameFmt`)
+/// - `Ok(None)` if no `rename_all` attribute is present in `struct_attrs`
+/// - `Ok(Some(RenameFmt))` otherwise
+fn get_struct_rename_all_fmt(
+    struct_attrs: &[syn::Attribute],
+) -> syn::Result<Option<RenameFmt>> {
+    use std::convert::TryFrom as _;
+    use syn::spanned::Spanned as _;
+
+    let tups_attr_lit: Vec<_> = dynomite_attributes(struct_attrs)
+        .filter_map(|attr|
+            get_name_eq_value_attribute_lit(attr, "rename_all").ok()
+                .map(|lit| (attr, lit))
+        )
+        .collect();
+
+    match tups_attr_lit.len() {
+        0 => Ok(None),
+        1 => {
+            let (attr, lit) = &tups_attr_lit[0];
+
+            match lit {
+                syn::Lit::Str(lit_str) => {
+                    let value = lit_str.value();
+
+                    if value.trim().is_empty() {
+                        return Err(syn::Error::new(
+                            lit_str.span(),
+                            "`rename_all` attribute value must be a non-empty string literal",
+                        ));
+                    }
+
+                    let fmt = RenameFmt::try_from(lit_str.value().as_ref())
+                        .map_err(|()| syn::Error::new(
+                            lit_str.span(),
+                            "invalid `rename_all` attribute value",
+                        ))?;
+
+                    Ok(Some(fmt))
+                },
+                _ => return Err(syn::Error::new(
+                    attr.span(),
+                    "`rename_all` attribute value must be a string literal",
+                )),
+            }
+        },
+        _ => {
+            // Pick the 2nd since it is the first duplicate
+            let attr_to_err_on = tups_attr_lit[1].0;
+            return Err(syn::Error::new(
+                attr_to_err_on.span(),
+                "structs may have a maximum of 1 `#[dynomite(rename_all = \"...\")]` attribute",
+            ));
+        },
+    }
+}
+
 fn make_dynomite_item(
+    attrs: &[syn::Attribute],
     vis: &Visibility,
     name: &Ident,
     fields: &[Field],
 ) -> syn::Result<impl ToTokens> {
-    let dynamodb_traits = get_dynomite_item_traits(vis, name, fields)?;
-    let from_attribute_map = get_from_attributes_trait(name, fields)?;
-    let to_attribute_map = get_to_attribute_map_trait(name, fields)?;
+    let rename_all_fmt_opt = get_struct_rename_all_fmt(attrs)?;
+    let dynamodb_traits = get_dynomite_item_traits(vis, name, fields, rename_all_fmt_opt)?;
+    let from_attribute_map = get_from_attributes_trait(name, fields, rename_all_fmt_opt)?;
+    let to_attribute_map = get_to_attribute_map_trait(name, fields, rename_all_fmt_opt)?;
 
     Ok(quote! {
         #from_attribute_map
@@ -180,10 +295,11 @@ fn make_dynomite_item(
 fn get_to_attribute_map_trait(
     name: &Ident,
     fields: &[Field],
+    rename_all_fmt: Option<RenameFmt>,
 ) -> syn::Result<impl ToTokens> {
     let attributes = quote!(::dynomite::Attributes);
     let from = quote!(::std::convert::From);
-    let to_attribute_map = get_to_attribute_map_function(name, fields)?;
+    let to_attribute_map = get_to_attribute_map_function(name, fields, rename_all_fmt)?;
 
     Ok(quote! {
         impl #from<#name> for #attributes {
@@ -282,8 +398,16 @@ fn get_name_eq_value_attribute_lit(
 /// - `Err` if multiple `#[dynomite(rename = "foo")]` attributes are present on `field`
 /// - `Err` if `value` in `#[dynomite(rename = value)]` is not a string literal
 /// - `Err` if `value` in `#[dynomite(rename = value)]` is an empty string literal
-fn get_field_deser_name(field: &Field) -> syn::Result<String> {
+fn get_field_deser_name(
+    field: &Field,
+    rename_fmt: Option<RenameFmt>,
+) -> syn::Result<String> {
     use syn::spanned::Spanned as _;
+
+    let name = field.ident
+        .as_ref()
+        .expect("name-less fields are not supported")
+        .to_string();
 
     let rename_value_opt = {
         let rename_value_lits = dynomite_attributes(&field.attrs)
@@ -323,25 +447,24 @@ fn get_field_deser_name(field: &Field) -> syn::Result<String> {
         }
     };
 
-    Ok(rename_value_opt.unwrap_or_else(|| {
-        field
-            .ident
-            .as_ref()
-            .expect("should have an identifier")
-            .to_string()
-    }))
+    Ok(match (rename_value_opt, rename_fmt) {
+        (Some(rename_value), _) => rename_value,
+        (_, Some(fmt)) => fmt.transform(&name),
+        _ => name,
+    })
 }
 
 fn get_to_attribute_map_function(
     name: &Ident,
     fields: &[Field],
+    rename_all_fmt: Option<RenameFmt>,
 ) -> syn::Result<impl ToTokens> {
     let to_attribute_value = quote!(::dynomite::Attribute::into_attr);
 
     let field_conversions = fields
         .iter()
         .map(|field| {
-            let field_deser_name = &match get_field_deser_name(field) {
+            let field_deser_name = &match get_field_deser_name(field, rename_all_fmt) {
                 Ok(name) => name,
                 Err(e) => return Err(e),
             };
@@ -379,9 +502,10 @@ fn get_to_attribute_map_function(
 fn get_from_attributes_trait(
     name: &Ident,
     fields: &[Field],
+    rename_all_fmt: Option<RenameFmt>,
 ) -> syn::Result<impl ToTokens> {
     let from_attrs = quote!(::dynomite::FromAttributes);
-    let from_attribute_map = get_from_attributes_function(fields)?;
+    let from_attribute_map = get_from_attributes_function(fields, rename_all_fmt)?;
 
     Ok(quote! {
         impl #from_attrs for #name {
@@ -390,13 +514,16 @@ fn get_from_attributes_trait(
     })
 }
 
-fn get_from_attributes_function(fields: &[Field]) -> syn::Result<impl ToTokens> {
+fn get_from_attributes_function(
+    fields: &[Field],
+    rename_all_fmt: Option<RenameFmt>,
+) -> syn::Result<impl ToTokens> {
     let attributes = quote!(::dynomite::Attributes);
     let from_attribute_value = quote!(::dynomite::Attribute::from_attr);
     let err = quote!(::dynomite::AttributeError);
 
     let field_conversions = fields.iter().map(|field| {
-        let field_deser_name = &match get_field_deser_name(field) {
+        let field_deser_name = &match get_field_deser_name(field, rename_all_fmt) {
             Ok(name) => name,
             Err(e) => return Err(e),
         };
@@ -423,8 +550,9 @@ fn get_dynomite_item_traits(
     vis: &Visibility,
     name: &Ident,
     fields: &[Field],
+    rename_all_fmt: Option<RenameFmt>,
 ) -> syn::Result<impl ToTokens> {
-    let impls = get_item_impls(vis, name, fields)?;
+    let impls = get_item_impls(vis, name, fields, rename_all_fmt)?;
 
     Ok(quote! {
         #impls
@@ -435,9 +563,10 @@ fn get_item_impls(
     vis: &Visibility,
     name: &Ident,
     fields: &[Field],
+    rename_all_fmt: Option<RenameFmt>,
 ) -> syn::Result<impl ToTokens> {
-    let item_trait = get_item_trait(name, fields)?;
-    let key_struct = get_key_struct(vis, name, fields)?;
+    let item_trait = get_item_trait(name, fields, rename_all_fmt)?;
+    let key_struct = get_key_struct(vis, name, fields, rename_all_fmt)?;
 
     Ok(quote! {
         #item_trait
@@ -457,6 +586,7 @@ fn get_item_impls(
 fn get_item_trait(
     name: &Ident,
     fields: &[Field],
+    rename_all_fmt: Option<RenameFmt>,
 ) -> syn::Result<impl ToTokens> {
     let item = quote!(::dynomite::Item);
     let attribute_map = quote!(
@@ -467,10 +597,13 @@ fn get_item_trait(
 
     let partition_key_insert = partition_key_field
         .as_ref()
-        .map(get_key_inserter)
+        .map(|field| get_key_inserter(field, rename_all_fmt))
         .transpose()?;
 
-    let sort_key_insert = sort_key_field.as_ref().map(get_key_inserter).transpose()?;
+    let sort_key_insert = sort_key_field
+        .as_ref()
+        .map(|field| get_key_inserter(field, rename_all_fmt))
+        .transpose()?;
 
     Ok(partition_key_field
         .map(|_| {
@@ -517,9 +650,12 @@ fn field_with_attribute(
 ///   "field_deser_name", to_attribute_value(field)
 /// );
 /// ```
-fn get_key_inserter(field: &Field) -> syn::Result<impl ToTokens> {
+fn get_key_inserter(
+    field: &Field,
+    rename_all_fmt: Option<RenameFmt>,
+) -> syn::Result<impl ToTokens> {
     let to_attribute_value = quote!(::dynomite::Attribute::into_attr);
-    let field_deser_name = &get_field_deser_name(field)?;
+    let field_deser_name = &get_field_deser_name(field, rename_all_fmt)?;
     let field_ident = &field.ident;
     Ok(quote! {
         keys.insert(
@@ -540,13 +676,14 @@ fn get_key_struct(
     vis: &Visibility,
     name: &Ident,
     fields: &[Field],
+    rename_all_fmt: Option<RenameFmt>,
 ) -> syn::Result<impl ToTokens> {
     let name = Ident::new(&format!("{}Key", name), Span::call_site());
 
     let partition_key_field = field_with_attribute(&fields, "partition_key")
         .map(|mut field| {
             // rename the field to the de/ser name
-            if let Err(e) = rename_field_to_deser_name(&mut field) {
+            if let Err(e) = rename_field_to_deser_name(&mut field, rename_all_fmt) {
                 return Err(e);
             }
 
@@ -563,7 +700,7 @@ fn get_key_struct(
     let sort_key_field = field_with_attribute(&fields, "sort_key")
         .map(|mut field| {
             // rename the field to the de/ser name
-            if let Err(e) = rename_field_to_deser_name(&mut field) {
+            if let Err(e) = rename_field_to_deser_name(&mut field, rename_all_fmt) {
                 return Err(e);
             }
 
@@ -592,8 +729,11 @@ fn get_key_struct(
 }
 
 /// Change `field.ident` to the value returned by `get_field_deser_name`
-fn rename_field_to_deser_name(field: &mut Field) -> syn::Result<()> {
-    let field_deser_name = get_field_deser_name(field)?;
+fn rename_field_to_deser_name(
+    field: &mut Field,
+    rename_all_fmt: Option<RenameFmt>,
+) -> syn::Result<()> {
+    let field_deser_name = get_field_deser_name(field, rename_all_fmt)?;
 
     field.ident = field
         .ident
