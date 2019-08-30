@@ -398,26 +398,60 @@ fn get_name_eq_value_attribute_lit(
 
 /// The name of the field to be used during de/serialization
 ///
+/// # Examples
+///
+/// Imagine that you have the following type definition and the type-level
+/// `rename_all` attribute has been correctly parsed into `RenameFmt::KebabCase`.
+///
+/// ```rust,ignore
+/// #[dynomite(rename_all = "kebab-case")]
+/// struct Thing {
+///     #[dynomite(rename = "bloop")]
+///     foo_bar: String,
+///     yee_haw: String,
+/// }
+/// ```
+///
+/// Calling this function with the `foo_bar` field and `Some(RenameFmt::KebabCase)`
+/// would return `"bloop"`.
+///
+/// Calling this function with the `yee_haw` field and `Some(RenameFmt::KebabCase)`
+/// would return `"yee-haw"`.
+///
+/// The field-level `rename` attribute takes precedence over the type-level
+/// `rename_all` attribute.
+///
 /// # Returns
-/// `Ok("foo")` from `#[dynomite(rename = "foo")]` if applicable, otherwise `Ok(field.ident)`
-/// - `Err` if multiple `#[dynomite(rename = "foo")]` attributes are present on `field`
-/// - `Err` if `value` in `#[dynomite(rename = value)]` is not a string literal
-/// - `Err` if `value` in `#[dynomite(rename = value)]` is an empty string literal
+/// - `Err` if
+///   - `field.ident` is `None` (name-less fields are not supported)
+///   - multiple `#[dynomite(rename = value)]` attributes are present on `field`
+///   - `value` in `#[dynomite(rename = value)]` is not a string literal
+///   - `value` in `#[dynomite(rename = value)]` is an empty string literal
+///   - a non-`rename` dynomite attribute is present on `field`
+/// - `Ok` otherwise
 fn get_field_deser_name(
     field: &Field,
     rename_fmt: Option<RenameFmt>,
 ) -> syn::Result<String> {
     use syn::spanned::Spanned as _;
 
-    let name = field
-        .ident
-        .as_ref()
-        .expect("name-less fields are not supported")
-        .to_string();
+    let name = match field.ident.as_ref() {
+        Some(ident) => ident.to_string(),
+        _ => return Err(syn::Error::new(
+            field.span(),
+            "name-less fields are not supported",
+        )),
+    };
 
     let rename_value_opt = {
         let rename_value_lits = dynomite_attributes(&field.attrs)
-            .map(|attr| get_name_eq_value_attribute_lit(attr, "rename"))
+            .map(|attr| {
+                // `rename` is the only field-level attribute supported
+                // currently, if/when another is supported we'll want to change
+                // this so we don't return `Err` when encountering a non-`rename`
+                // attribute
+                get_name_eq_value_attribute_lit(attr, "rename")
+            })
             .collect::<syn::Result<Vec<_>>>()?;
 
         if rename_value_lits.len() > 1 {
