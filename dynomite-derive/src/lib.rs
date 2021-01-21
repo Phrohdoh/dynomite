@@ -471,7 +471,6 @@ fn make_dynomite_attrs_for_struct(
     // impl ::dynomite::FromAttributes for Name
     let from_attribute_map = get_from_attributes_trait(name, &item_fields);
     // impl ::dynomite::IntoAttributes for Name
-    // impl From<Name> for ::dynomite::Attributes
     let to_attribute_map = get_to_attribute_map_trait(name, &item_fields);
     // impl TryFrom<::dynomite::Attributes> for Name
     // impl From<Name> for ::dynomite::Attributes
