@@ -240,4 +240,58 @@ mod tests {
         assert!(attrs.contains_key("kind"));
         assert!(attrs.contains_key("a"));
     }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn derive_item_rename_all_attr_kebab_case() {
+        // GIVEN
+        #[derive(Item)]
+        #[dynomite(rename_all = "kebab-case")]
+        struct SnowConeReceiptItem {
+            #[dynomite(partition_key)]
+            _pk: String,
+            #[dynomite(sort_key)]
+            sk: String,
+            #[dynomite(rename = "fooBar")]
+            with_Field_levelRename: Option<i32>,
+
+            snake_case: bool,
+            camelCase: bool,
+            PascalCase: bool,
+            SCREAMING_SNAKE_CASE: bool,
+            UPPERCASE: bool,
+            lowercase: bool,
+        }
+
+        let original = SnowConeReceiptItem {
+            _pk: "6956abd4-665f-433a-b9ad-c038f9c64601".into(),
+            sk: "2021-01-20T22:41:41.603Z".into(),
+            with_Field_levelRename: Some(1024),
+            snake_case: true,
+            camelCase: true,
+            PascalCase: true,
+            SCREAMING_SNAKE_CASE: true,
+            UPPERCASE: true,
+            lowercase: true,
+        };
+
+        // WHEN
+        let attrs: Attributes = original.into();
+
+        for (ddb_attr_key, _ddb_attr_val) in &attrs {
+            println!("{:?}", ddb_attr_key);
+        }
+
+        // THEN
+        assert_eq!(attrs.len(), 9);
+        assert!(attrs.contains_key("_pk"), "leading underscore retained");
+        assert!(attrs.contains_key("sk"), "unchanged");
+        assert!(attrs.contains_key("fooBar"), "field-level rename has precedent");
+        assert!(attrs.contains_key("snake-case"));
+        assert!(attrs.contains_key("camel-case"));
+        assert!(attrs.contains_key("pascal-case"));
+        assert!(attrs.contains_key("screaming-snake-case"));
+        assert!(attrs.contains_key("uppercase"));
+        assert!(attrs.contains_key("lowercase"));
+    }
 }
