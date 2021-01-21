@@ -463,6 +463,13 @@ fn make_dynomite_attrs_for_enum(enum_item: &DataEnum) -> impl ToTokens {
     }
 }
 
+/// Generate the following for a _struct_ (e.g. `Name`):
+///
+/// - `impl ::dynomite::FromAttributes for Name`
+/// - `impl ::dynomite::IntoAttributes for Name`
+/// - `impl TryFrom<::dynomite::Attributes> for Name`
+/// - `impl From<Name> for ::dynomite::Attributes`
+///
 fn make_dynomite_attrs_for_struct(
     name: &Ident,
     fields: &[Field],
