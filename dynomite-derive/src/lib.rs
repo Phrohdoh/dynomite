@@ -414,7 +414,7 @@ fn expand_attributes(ast: DeriveInput) -> syn::Result<TokenStream> {
     let tokens = match ast.data {
         syn::Data::Struct(DataStruct { fields, .. }) => match fields {
             Fields::Named(named) => {
-                make_dynomite_attrs_for_struct(&name, &named.named.into_iter().collect::<Vec<_>>())
+                make_dynomite_attrs_impls_for_struct(&name, &named.named.into_iter().collect::<Vec<_>>())
                     .into_token_stream()
             }
             fields => {
@@ -425,7 +425,7 @@ fn expand_attributes(ast: DeriveInput) -> syn::Result<TokenStream> {
             }
         },
         syn::Data::Enum(data_enum) => {
-            make_dynomite_attrs_for_enum(&DataEnum::new(name, data_enum, &ast.attrs))
+            make_dynomite_attrs_impls_for_enum(&DataEnum::new(name, data_enum, &ast.attrs))
                 .into_token_stream()
         }
         _ => panic!("Dynomite Attributes can only be generated for structs"),
@@ -451,7 +451,7 @@ fn expand_item(ast: DeriveInput) -> syn::Result<impl ToTokens> {
     }
 }
 
-fn make_dynomite_attrs_for_enum(enum_item: &DataEnum) -> impl ToTokens {
+fn make_dynomite_attrs_impls_for_enum(enum_item: &DataEnum) -> impl ToTokens {
     let from_attributes = enum_item.impl_from_attributes();
     let into_attributes = enum_item.impl_into_attributes();
     let std_into_attrs = get_std_convert_traits(&enum_item.ident);
@@ -470,7 +470,7 @@ fn make_dynomite_attrs_for_enum(enum_item: &DataEnum) -> impl ToTokens {
 /// - `impl TryFrom<::dynomite::Attributes> for Name`
 /// - `impl From<Name> for ::dynomite::Attributes`
 ///
-fn make_dynomite_attrs_for_struct(
+fn make_dynomite_attrs_impls_for_struct(
     name: &Ident,
     fields: &[Field],
 ) -> impl ToTokens {
