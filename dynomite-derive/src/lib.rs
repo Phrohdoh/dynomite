@@ -262,7 +262,7 @@ impl<'a> ItemField<'a> {
             .any(|attr| matches!(attr.kind, FieldAttrKind::Flatten))
     }
 
-    fn deser_name(&self) -> String {
+    fn deser_name(&self, opt_rename_all_format: Option<RenameAllFormat>) -> String {
         let ItemField { field, attrs } = self;
         attrs
             .iter()
@@ -271,12 +271,40 @@ impl<'a> ItemField<'a> {
                 _ => None,
             })
             .unwrap_or_else(|| {
-                field
-                    .ident
-                    .as_ref()
-                    .expect("should have an identifier")
-                    .to_string()
-            })
+                opt_rename_all_format.map(|rename_all_fmt| {
+                    match rename_all_fmt {
+                        RenameAllFormat::Kebab => {
+                            use heck::KebabCase as _;
+                            let original = field
+                                .ident
+                                .as_ref()
+                                .expect("should have an identifier")
+                                .to_string();
+
+                            let renamed = {
+                                // `heck` removes leading punctuation but we
+                                // want to preserve a single leading underscore
+                                // if applicable
+                                let kebabed = original.to_kebab_case();
+                                if original.starts_with('_') {
+                                    format!("_{}", kebabed)
+                                } else {
+                                    kebabed
+                                }
+                            };
+
+                            renamed
+                        },
+                    }
+                })
+                .unwrap_or_else(|| {
+                    field
+                        .ident
+                        .as_ref()
+                        .expect("should have an identifier")
+                        .to_string()
+                })
+        })
     }
 }
 
@@ -414,7 +442,11 @@ fn expand_attributes(ast: DeriveInput) -> syn::Result<TokenStream> {
     let tokens = match ast.data {
         syn::Data::Struct(DataStruct { fields, .. }) => match fields {
             Fields::Named(named) => {
-                make_dynomite_attrs_impls_for_struct(&name, &named.named.into_iter().collect::<Vec<_>>())
+                make_dynomite_attrs_impls_for_struct(
+                    &name,
+                    ast.attrs.as_slice(),
+                    &named.named.into_iter().collect::<Vec<_>>(),
+                )
                     .into_token_stream()
             }
             fields => {
@@ -440,7 +472,12 @@ fn expand_item(ast: DeriveInput) -> syn::Result<impl ToTokens> {
     match ast.data {
         syn::Data::Struct(DataStruct { fields, .. }) => match fields {
             Fields::Named(named) => {
-                make_dynomite_item(vis, name, &named.named.into_iter().collect::<Vec<_>>())
+                make_dynomite_item(
+                    vis,
+                    name,
+                    ast.attrs.as_slice(),
+                    &named.named.into_iter().collect::<Vec<_>>(),
+                )
             }
             fields => Err(syn::Error::new(
                 fields.span(),
@@ -472,13 +509,23 @@ fn make_dynomite_attrs_impls_for_enum(enum_item: &DataEnum) -> impl ToTokens {
 ///
 fn make_dynomite_attrs_impls_for_struct(
     name: &Ident,
+    struct_attrs: &[Attribute],
     fields: &[Field],
 ) -> impl ToTokens {
     let item_fields = fields.iter().map(ItemField::new).collect::<Vec<_>>();
+    let struct_outer_attrs: Vec<attr::Attr<attr::ItemAttrKind>> = parse_attrs::<attr::ItemAttr>(
+        struct_attrs.iter()
+            .filter(|attr| attr.style == syn::AttrStyle::Outer)
+            .cloned()
+            .collect::<Vec<_>>()
+            .as_slice()
+    );
+
     // impl ::dynomite::FromAttributes for Name
-    let from_attribute_map = get_from_attributes_trait(name, &item_fields);
+    let from_attribute_map = get_from_attributes_trait(name, &struct_outer_attrs, &item_fields);
     // impl ::dynomite::IntoAttributes for Name
-    let to_attribute_map = get_to_attribute_map_trait(name, &item_fields);
+    let to_attribute_map = get_to_attribute_map_trait(name, &struct_outer_attrs, &item_fields);
+
     // impl TryFrom<::dynomite::Attributes> for Name
     // impl From<Name> for ::dynomite::Attributes
     let std_into_attrs = get_std_convert_traits(name);
@@ -493,6 +540,7 @@ fn make_dynomite_attrs_impls_for_struct(
 fn make_dynomite_item(
     vis: &Visibility,
     name: &Ident,
+    item_attrs: &[Attribute],
     fields: &[Field],
 ) -> syn::Result<impl ToTokens> {
     let item_fields = fields.iter().map(ItemField::new).collect::<Vec<_>>();
@@ -507,12 +555,15 @@ fn make_dynomite_item(
             ),
         ));
     }
+
+    let item_attrs = parse_attrs::<attr::ItemAttr>(item_attrs);
+
     // impl Item for Name + NameKey struct
-    let dynamodb_traits = get_dynomite_item_traits(vis, name, &item_fields)?;
+    let dynamodb_traits = get_dynomite_item_traits(vis, name, &item_attrs, &item_fields)?;
     // impl ::dynomite::FromAttributes for Name
-    let from_attribute_map = get_from_attributes_trait(name, &item_fields);
+    let from_attribute_map = get_from_attributes_trait(name, &item_attrs, &item_fields);
     // impl ::dynomite::IntoAttributes for Name
-    let to_attribute_map = get_to_attribute_map_trait(name, &item_fields);
+    let to_attribute_map = get_to_attribute_map_trait(name, &item_attrs, &item_fields);
     // impl TryFrom<::dynomite::Attributes> for Name
     // impl From<Name> for ::dynomite::Attributes
     let std_into_attrs = get_std_convert_traits(name);
@@ -527,9 +578,10 @@ fn make_dynomite_item(
 
 fn get_to_attribute_map_trait(
     name: &Ident,
+    item_attrs: &[attr::ItemAttr],
     fields: &[ItemField],
 ) -> impl ToTokens {
-    let into_attrs = get_into_attrs(fields);
+    let into_attrs = get_into_attrs(item_attrs, fields);
 
     quote! {
         impl ::dynomite::IntoAttributes for #name {
@@ -558,9 +610,42 @@ fn get_std_convert_traits(entity_name: &Ident) -> impl ToTokens {
     }
 }
 
-fn get_into_attrs(fields: &[ItemField]) -> impl ToTokens {
+#[derive(Clone, Copy)]
+enum RenameAllFormat {
+    Kebab,
+}
+
+/// Given the parsed attributes of a struct deriving [Item] with a dynomite
+/// `rename_all` attribute as shown, this function will return
+/// `Some(RenameAllFormat::Kebab)`.
+///
+/// ```rust,ignore
+/// #[derive(dynomite::Item)]
+/// #[dynomite(rename_all = "kebab-case")]
+/// struct MyItem {
+///    #[dynomite(partition_key)]
+///     pk: String,
+///     foo_bar: bool,
+/// }
+fn get_rename_all_format(
+    item_attrs: &[attr::ItemAttr],
+) -> Option<RenameAllFormat> {
+    item_attrs.iter().find_map(|attr| match &attr.kind {
+        attr::ItemAttrKind::RenameAll(lit) => match lit.value().as_str() {
+            "kebab-case" => Some(RenameAllFormat::Kebab),
+            other => todo!("handle #[dynomite(rename_all = '{}')", other),
+        },
+    })
+}
+
+fn get_into_attrs(
+    item_attrs: &[attr::ItemAttr],
+    fields: &[ItemField],
+) -> impl ToTokens {
+    let opt_rename_all_format = get_rename_all_format(item_attrs);
+
     let field_conversions = fields.iter().map(|field| {
-        let field_deser_name = field.deser_name();
+        let field_deser_name = field.deser_name(opt_rename_all_format.clone());
         let field_ident = &field.field.ident;
 
         if field.is_flatten() {
@@ -598,10 +683,11 @@ fn get_into_attrs(fields: &[ItemField]) -> impl ToTokens {
 /// ```
 fn get_from_attributes_trait(
     name: &Ident,
+    item_attrs: &[attr::ItemAttr],
     fields: &[ItemField],
 ) -> impl ToTokens {
     let from_attrs = quote!(::dynomite::FromAttributes);
-    let from_attrs_fn = get_from_attrs_function(fields);
+    let from_attrs_fn = get_from_attrs_function(item_attrs, fields);
 
     quote! {
         impl #from_attrs for #name {
@@ -610,12 +696,16 @@ fn get_from_attributes_trait(
     }
 }
 
-fn get_from_attrs_function(fields: &[ItemField]) -> impl ToTokens {
+fn get_from_attrs_function(
+    item_attrs: &[attr::ItemAttr],
+    fields: &[ItemField],
+) -> impl ToTokens {
+    let opt_rename_all_format = get_rename_all_format(item_attrs);
+
     let var_init_statements = fields
         .iter()
         .map(|field| {
-            // field might have #[dynomite(rename = "...")] attribute
-            let field_deser_name = field.deser_name();
+            let field_deser_name = field.deser_name(opt_rename_all_format);
             let field_ident = &field.field.ident;
             let expr = if field.is_default_when_absent() {
                 quote! {
@@ -663,9 +753,10 @@ fn get_from_attrs_function(fields: &[ItemField]) -> impl ToTokens {
 fn get_dynomite_item_traits(
     vis: &Visibility,
     name: &Ident,
+    item_attrs: &[attr::ItemAttr],
     fields: &[ItemField],
 ) -> syn::Result<impl ToTokens> {
-    let impls = get_item_impls(vis, name, fields)?;
+    let impls = get_item_impls(vis, name, item_attrs, fields)?;
 
     Ok(quote! {
         #impls
@@ -675,10 +766,11 @@ fn get_dynomite_item_traits(
 fn get_item_impls(
     vis: &Visibility,
     name: &Ident,
+    item_attrs: &[attr::ItemAttr],
     fields: &[ItemField],
 ) -> syn::Result<impl ToTokens> {
     // impl ::dynomite::Item for Name ...
-    let item_trait = get_item_trait(name, fields)?;
+    let item_trait = get_item_trait(name, item_attrs, fields)?;
     // pub struct NameKey ...
     let key_struct = get_key_struct(vis, name, fields)?;
 
@@ -699,6 +791,7 @@ fn get_item_impls(
 /// ```
 fn get_item_trait(
     name: &Ident,
+    item_attrs: &[attr::ItemAttr],
     fields: &[ItemField],
 ) -> syn::Result<impl ToTokens> {
     let item = quote!(::dynomite::Item);
@@ -707,8 +800,14 @@ fn get_item_trait(
     );
     let partition_key_field = fields.iter().find(|f| f.is_partition_key());
     let sort_key_field = fields.iter().find(|f| f.is_sort_key());
-    let partition_key_insert = partition_key_field.map(get_key_inserter).transpose()?;
-    let sort_key_insert = sort_key_field.map(get_key_inserter).transpose()?;
+
+    let opt_rename_all_format = get_rename_all_format(item_attrs);
+    let partition_key_insert = partition_key_field
+        .map(|f| get_key_inserter(opt_rename_all_format, f))
+        .transpose()?;
+    let sort_key_insert = sort_key_field
+        .map(|f| get_key_inserter(opt_rename_all_format, f))
+        .transpose()?;
 
     Ok(partition_key_field
         .map(|_| {
@@ -731,10 +830,13 @@ fn get_item_trait(
 ///   "field_deser_name", to_attribute_value(field)
 /// );
 /// ```
-fn get_key_inserter(field: &ItemField) -> syn::Result<impl ToTokens> {
+fn get_key_inserter(
+    opt_rename_all_format: Option<RenameAllFormat>,
+    field: &ItemField,
+) -> syn::Result<impl ToTokens> {
     let to_attribute_value = quote!(::dynomite::Attribute::into_attr);
 
-    let field_deser_name = field.deser_name();
+    let field_deser_name = field.deser_name(opt_rename_all_format);
     let field_ident = &field.field.ident;
     Ok(quote! {
         keys.insert(

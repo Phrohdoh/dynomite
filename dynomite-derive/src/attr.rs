@@ -15,12 +15,25 @@ pub(crate) struct Attr<Kind> {
     pub(crate) kind: Kind,
 }
 
+/// Attribute that appears outside of the type
+pub(crate) type ItemAttr = Attr<ItemAttrKind>;
 /// Attribute that appears on record fields (struct fields and enum record variant fields)
 pub(crate) type FieldAttr = Attr<FieldAttrKind>;
 /// Attribute that appears on the top level of an enum
 pub(crate) type EnumAttr = Attr<EnumAttrKind>;
 /// Attribute that appears on enum varinats
 pub(crate) type VariantAttr = Attr<VariantAttrKind>;
+
+#[derive(Clone)]
+pub(crate) enum ItemAttrKind {
+    /// Denotes all fields not otherwise renamed should be renamed to match the
+    /// format of the LitStr
+    RenameAll(LitStr),
+}
+
+impl DynomiteAttr for ItemAttrKind {
+    const KVS: Kvs<Self> = &[("rename_all", Self::RenameAll)];
+}
 
 #[derive(Clone)]
 pub(crate) enum FieldAttrKind {
